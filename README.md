@@ -11,11 +11,3 @@ This is the official PyTorch implementation of the paper **SMD: A Stable Medical
 ## Paper Abstract
 The generative modeling of medical images presents significant challenges due to their high-resolution and three-dimensional nature. Existing methods often yield suboptimal performance in generating high-quality 3D medical images, and there is currently no universal generative framework for medical imaging. In this paper, we introduce the Stable Medical Diffusion (SMD) model for controllable, high-quality 3D medical image generation. SMD incorporates a novel, highly efficient Patch-Volume Autoencoder that compresses medical images into latent space through patch-wise encoding and recovers back into image space through volume-wise decoding. Additionally, we design a new noise estimator to capture both local details and global structure information during diffusion denoising process. SMD can generate fine-detailed, high-resolution images (up to 512x512x512) and effectively adapt to various downstream tasks as it is trained on large-scale medical datasets covering multiple modalities (CT and MRI) and anatomical regions (from head to leg).
 Experimental results demonstrate that SMD surpasses state-of-the-art methods in generative quality and exhibits strong generalizability across tasks such as sparse-view CT reconstruction, fast MRI reconstruction, and data augmentation.
-
-<p>
-    <img width="750" src="assets/pic1.jpg"/>
-</p>
-
-<p>
-    <img width="750" src="assets/pic2.jpg"/>
-</p>
