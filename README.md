@@ -13,9 +13,9 @@ The generative modeling of medical images presents significant challenges due to
 Experimental results demonstrate that SMD surpasses state-of-the-art methods in generative quality and exhibits strong generalizability across tasks such as sparse-view CT reconstruction, fast MRI reconstruction, and data augmentation.
 
 <p>
-    <img width="750" src="assets/Autoencoder.png"/>
+    <img width="750" src="assets/pic1.jpg"/>
 </p>
 
 <p>
-    <img width="750" src="assets/BiFlowNet.png"/>
+    <img width="750" src="assets/pic2.jpg"/>
 </p>
