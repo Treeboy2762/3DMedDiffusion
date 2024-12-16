@@ -1,10 +1,10 @@
 # SMD: A Stable Medical Diffusion Model for Controllable and High-quality 3D Medical Images Generation
 [![Static Badge](https://img.shields.io/badge/Project-page-blue)](..)
 [![arXiv](https://img.shields.io/badge/arXiv-2402.19043-b31b1b.svg)](..)
-[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Model%20Page-orange)](..)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Model%20Page-orange)](https://huggingface.co/MMorss/SMD)
 
 This is the official PyTorch implementation of the paper **SMD: A Stable Medical Diffusion Model for Controllable and High-quality 3D Medical Images Generation** 
-
+![SMD in Action](assets/gif_github.gif)
 
 
 
