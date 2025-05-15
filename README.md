@@ -1,5 +1,5 @@
 # 3D MedDiffusion: A 3D Medical Diffusion Model for Controllable and High-quality Medical Image Generation
-[![Static Badge](https://img.shields.io/badge/Project-page-blue)](https://shanghaitech-impact.github.io/3D-MedDiffusion.github.io/)
+[![Static Badge](https://img.shields.io/badge/Project-page-blue)](https://shanghaitech-impact.github.io/3D-MedDiffusion/)
 [![arXiv](https://img.shields.io/badge/arXiv-2402.19043-b31b1b.svg)](https://arxiv.org/abs/2412.13059)
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Model%20Page-orange)](https://huggingface.co/MMorss/3D-MedDiffusion)
 
