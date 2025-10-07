@@ -24,6 +24,52 @@ from torch.utils.data import Dataset, DataLoader
 
 # helpers functions
 
+class CrossAttention(nn.Module):
+    """Cross-attention layer for text conditioning"""
+    def __init__(self, query_dim, context_dim, heads=8, dim_head=64, dropout=0.):
+        super().__init__()
+        inner_dim = dim_head * heads
+        
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, query_dim),
+            nn.Dropout(dropout)
+        )
+        
+        # Zero-init output projection for stable training
+        nn.init.zeros_(self.to_out[0].weight)
+        nn.init.zeros_(self.to_out[0].bias)
+    
+    def forward(self, x, context):
+        h = self.heads
+        q = self.to_q(x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+        
+        # print(f"x shape: {x.shape}")
+        # print(f"text_context shape: {context.shape}")
+        # print(f"q shape: {q.shape}")
+        # print(f"k shape: {k.shape}")
+        # print(f"v shape: {v.shape}")
+
+        # Reshape for multi-head attention: (batch, heads, seq_len, dim_per_head)
+        q = rearrange(q, 'b n (h d) -> b h n d', h=h)
+        k = rearrange(k, 'b n (h d) -> b h n d', h=h)
+        v = rearrange(v, 'b n (h d) -> b h n d', h=h)
+        
+        # Use PyTorch's optimized scaled dot-product attention
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0 if not self.training else 0.1)
+        
+        # Reshape back: (batch, seq_len, total_dim)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
 class PatchEmbed_Voxel(nn.Module):
     """ Voxel to Patch Embedding
     """
@@ -49,14 +95,28 @@ class FinalLayer(nn.Module):
     """
     The final layer of DiT block.
     """
-    def __init__(self, hidden_size, patch_size, out_channels):
+    def __init__(self, hidden_size, patch_size, out_channels, cond_dim=None):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * patch_size * out_channels, bias=True)
+        
+        # Use cond_dim if provided, otherwise fall back to original hardcoded dimension
+        if cond_dim is None:
+            cond_dim = 4 * hidden_size * 2  # Original hardcoded dimension
+            
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(4*hidden_size*2, 2 * hidden_size, bias=True)
+            nn.Linear(cond_dim, 2 * hidden_size, bias=True)
         )
+
+    def _init_weights(self):
+        """Initialize weights for stable training"""
+        # Zero-init the AdaLN modulation
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+        # Zero-init the final linear layer
+        nn.init.zeros_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
 
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
@@ -100,7 +160,7 @@ def get_3d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=
     return:
     pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
     """
-    print('grid_size:', grid_size)
+    # print('grid_size:', grid_size)
 
     grid_x = np.arange(grid_size[0], dtype=np.float32)
     grid_y = np.arange(grid_size[1], dtype=np.float32)
@@ -153,19 +213,36 @@ class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip=False,**block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip=False, cond_dim=None, **block_kwargs):
         super().__init__()
         self.skip_linear = nn.Linear(2*hidden_size, hidden_size) if skip else None
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)  # No cond_dim here
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        
+        # Use cond_dim if provided, otherwise fall back to original hardcoded dimension
+        if cond_dim is None:
+            cond_dim = 4 * hidden_size * 2  # Original hardcoded dimension
+            
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(4 * hidden_size*2, 6 * hidden_size, bias=True)
+            nn.Linear(cond_dim, 6 * hidden_size, bias=True)
         )
+        
+    def _init_weights(self):
+        """Initialize weights for stable training"""
+        # Zero-init the AdaLN modulation
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+        
+        # Zero-init attention output projections
+        if hasattr(self.attn, 'proj'):
+            nn.init.zeros_(self.attn.proj.weight)
+            if self.attn.proj.bias is not None:
+                nn.init.zeros_(self.attn.proj.bias)
 
     def forward(self, x, c , skip= None):
         if self.skip_linear is not None:
@@ -175,6 +252,75 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
+
+class TextConditionedDiTBlock(nn.Module):
+    """
+    A DiT block with text cross-attention and adaptive layer norm zero (adaLN-Zero) conditioning.
+    """
+    def __init__(self, hidden_size, num_heads, text_dim, cond_dim, mlp_ratio=4.0, skip=False, **block_kwargs):
+        super().__init__()
+        self.skip_linear = nn.Linear(2*hidden_size, hidden_size) if skip else None
+        
+        # Self-attention
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        
+        # Cross-attention to text
+        self.norm_cross = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.cross_attn = CrossAttention(hidden_size, text_dim, heads=num_heads)
+        
+        # MLP
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        
+        # AdaLN modulation (expanded for cross-attention)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cond_dim, 9 * hidden_size, bias=True)  # 9 instead of 6 for cross-attn
+        )
+
+        # Zero-init so the whole block is an identity at start
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+
+    def _init_weights(self):
+        """Initialize weights for stable training"""
+        # Zero-init the AdaLN modulation
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+        
+        # Zero-init attention output projections
+        if hasattr(self.attn, 'proj'):
+            nn.init.zeros_(self.attn.proj.weight)
+            if self.attn.proj.bias is not None:
+                nn.init.zeros_(self.attn.proj.bias)
+
+    def forward(self, x, c, text_context=None, skip=None):
+        if self.skip_linear is not None:
+            x = self.skip_linear(torch.cat([x, skip], dim=-1))
+            
+        # Get modulation parameters (9 total for self-attn + cross-attn + mlp)
+        modulation_chunks = self.adaLN_modulation(c).chunk(9, dim=1)
+        (shift_msa, scale_msa, gate_msa, 
+         shift_cross, scale_cross, gate_cross,
+         shift_mlp, scale_mlp, gate_mlp) = modulation_chunks
+        
+        # Self-attention
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        
+        # Cross-attention to text (only if text_context is provided)
+        if text_context is not None:
+            x = x + gate_cross.unsqueeze(1) * self.cross_attn(
+                modulate(self.norm_cross(x), shift_cross, scale_cross), 
+                text_context
+            )
+        
+        # MLP
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        
+        return x
 
 
 def exists(x):
@@ -437,7 +583,7 @@ class BiFlowNet(nn.Module):
         self,
         dim,
         learn_sigma = False,
-        cond_classes=None,
+        text_embed_dim=768,  # Changed from cond_classes
         dim_mults=(1, 1, 2, 4, 8),
         sub_volume_size = (8,8,8),
         patch_size = 2,
@@ -451,10 +597,12 @@ class BiFlowNet(nn.Module):
         mlp_ratio=4,
         vq_size=64,
         res_condition=True,
-        num_mid_DiT=1
+        num_mid_DiT=1,
+        cross_attn_freq=2  # Apply cross-attention every N DiT layers
     ):
-        self.cond_classes = cond_classes
-        self.res_condition=res_condition
+        self.text_embed_dim = text_embed_dim  # Changed from cond_classes
+        self.res_condition = res_condition
+        self.cross_attn_freq = cross_attn_freq
 
         super().__init__()
         self.channels = channels
@@ -474,6 +622,16 @@ class BiFlowNet(nn.Module):
         in_out = list(zip(dims[:-1], dims[1:]))
         self.feature_fusion = np.asarray([item[0]==item[1] for item in in_out ]).sum()
         self.num_mid_DiT= num_mid_DiT
+        
+        # Explicit injection mapping beats feature_fusion heuristics
+        self.inject_down_levels = getattr(self, "inject_down_levels", list(range(self.feature_fusion)))  # default: all feature_fusion levels
+        self.inject_up_tail = getattr(self, "inject_up_tail", 2)  # default: last 2 up levels
+        
+        # Validate injection policy
+        assert all(0 <= i < len(in_out) for i in self.inject_down_levels), \
+            f"inject_down_levels {self.inject_down_levels} out of range [0, {len(in_out)})"
+        assert 0 <= self.inject_up_tail <= len(in_out), \
+            f"inject_up_tail {self.inject_up_tail} out of range [0, {len(in_out)}]"
         # time conditioning
 
         time_dim = dim * 4
@@ -486,47 +644,100 @@ class BiFlowNet(nn.Module):
 
         # text conditioning
 
-        if self.cond_classes is not None:
-            self.cond_emb = nn.Embedding(cond_classes, time_dim)
+        if self.text_embed_dim is not None:
+            # Project text embeddings to time_dim for additive conditioning
+            self.text_proj = nn.Sequential(
+                nn.Linear(text_embed_dim, time_dim),
+                nn.GELU(),
+                nn.Linear(time_dim, time_dim)
+            )
+            # Project text embeddings for cross-attention context
+            self.text_context_proj = nn.Linear(text_embed_dim, dim)
+            
         if self.res_condition is not None:
-            self.res_mlp =nn.Sequential(nn.Linear(3, time_dim), nn.SiLU(), nn.Linear(time_dim, time_dim))
-            time_dim = 2* time_dim
+            self.res_mlp = nn.Sequential(nn.Linear(3, time_dim), nn.SiLU(), nn.Linear(time_dim, time_dim))
+        
+        # Compute final conditioning dimension based on what we'll actually concatenate
+        cond_dim = time_dim  # Always have time
+        if self.text_embed_dim is not None:
+            cond_dim += time_dim  # Add text projection
+        if self.res_condition is not None:
+            cond_dim += time_dim  # Add resolution conditioning
+        
+        self.cond_dim = cond_dim  # Store for use in DiT blocks
         # layers
         ### miniDiT blocks 
         self.sub_volume_size = sub_volume_size
         self.patch_size = patch_size
         self.x_embedder = PatchEmbed_Voxel(sub_volume_size, patch_size, channels, dim, bias=True)
+        # print(f"DEBUG INIT: cond_dim = {cond_dim}, time_dim = {time_dim}")
+        # print(f"DEBUG INIT: text_embed_dim = {self.text_embed_dim}, res_condition = {self.res_condition}")
+
         num_patches = self.x_embedder.num_patches
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, dim), requires_grad=False)
+        # Initialize as nn.ModuleList from the start
         self.IntraPatchFlow_input = nn.ModuleList()
         for i in range(self.feature_fusion):
-            temp = [DiTBlock(dim, 
-                     DiT_num_heads, 
-                     mlp_ratio=mlp_ratio,
-                     )]
-            temp.append(FinalLayer(dim,self.patch_size,dim))
-            self.IntraPatchFlow_input.append(nn.ModuleList(temp))
-        self.IntraPatchFlow_input = nn.ModuleList(self.IntraPatchFlow_input)
+            # Use TextConditionedDiTBlock every cross_attn_freq layers for text conditioning
+            if self.text_embed_dim is not None and i % self.cross_attn_freq == 0:
+                block = TextConditionedDiTBlock(dim, 
+                         DiT_num_heads, 
+                         text_dim=dim,  # Use projected text dimension
+                         cond_dim=self.cond_dim,
+                         mlp_ratio=mlp_ratio
+                         )
+            else:
+                block = DiTBlock(dim, 
+                         DiT_num_heads, 
+                         mlp_ratio=mlp_ratio,
+                         cond_dim=self.cond_dim
+                         )
+            final_layer = FinalLayer(dim, self.patch_size, dim, cond_dim=self.cond_dim)
+            # Append a ModuleList containing the block and final layer
+            self.IntraPatchFlow_input.append(nn.ModuleList([block, final_layer]))
 
-        self.IntraPatchFlow_mid = []
+        # Correctly initialize the middle blocks as nn.ModuleList from the start
+        self.IntraPatchFlow_mid = nn.ModuleList()
         for i in range(self.num_mid_DiT):
-            self.IntraPatchFlow_mid.append(DiTBlock(dim, 
-                     DiT_num_heads, 
-                     mlp_ratio=mlp_ratio,
-                     ))
-        self.IntraPatchFlow_mid = nn.ModuleList(self.IntraPatchFlow_mid)
+            # Use TextConditionedDiTBlock for middle layers (they're most important)
+            if self.text_embed_dim is not None:
+                block = TextConditionedDiTBlock(dim, 
+                         DiT_num_heads, 
+                         text_dim=dim,  # Use projected text dimension
+                         cond_dim=self.cond_dim,
+                         mlp_ratio=mlp_ratio
+                         )
+            else:
+                block = DiTBlock(dim, 
+                         DiT_num_heads, 
+                         mlp_ratio=mlp_ratio,
+                         cond_dim=self.cond_dim
+                         )
+            self.IntraPatchFlow_mid.append(block)
 
 
+        # Correctly initialize the output blocks as nn.ModuleList from the start
         self.IntraPatchFlow_output = nn.ModuleList()
         for i in range(self.feature_fusion):
-            temp = [DiTBlock(dim, 
-                     DiT_num_heads, 
-                     mlp_ratio=mlp_ratio,
-                     skip= True
-                     )]
-            temp.append(FinalLayer(dim,self.patch_size,dim))
-            self.IntraPatchFlow_output.append(nn.ModuleList(temp))
-        self.IntraPatchFlow_output = nn.ModuleList(self.IntraPatchFlow_output)
+            # Use TextConditionedDiTBlock every cross_attn_freq layers for text conditioning
+            if self.text_embed_dim is not None and i % self.cross_attn_freq == 0:
+                block = TextConditionedDiTBlock(dim, 
+                         DiT_num_heads, 
+                         text_dim=dim,  # Use projected text dimension
+                         cond_dim=self.cond_dim,
+                         mlp_ratio=mlp_ratio,
+                         skip=True
+                         )
+            else:
+                block = DiTBlock(dim, 
+                         DiT_num_heads, 
+                         mlp_ratio=mlp_ratio,
+                         cond_dim=self.cond_dim,
+                         skip=True
+                         )
+            final_layer = FinalLayer(dim, self.patch_size, dim, cond_dim=self.cond_dim)
+            # Append a ModuleList containing the block and final layer
+            self.IntraPatchFlow_output.append(nn.ModuleList([block, final_layer]))
         ###
 
         self.downs = nn.ModuleList([])
@@ -537,7 +748,9 @@ class BiFlowNet(nn.Module):
         # block type
 
         block_klass = partial(ResnetBlock, groups=resnet_groups)
-        block_klass_cond = partial(block_klass, time_emb_dim=time_dim)
+        # ResnetBlock time_emb_dim should match what we pass to it (t_unet)
+        unet_time_dim = time_dim * 2 if self.res_condition else time_dim
+        block_klass_cond = partial(block_klass, time_emb_dim=unet_time_dim)
 
         # modules for all layers
 
@@ -593,43 +806,27 @@ class BiFlowNet(nn.Module):
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
         pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], (self.sub_volume_size[0]//self.patch_size, self.sub_volume_size[1]//self.patch_size , self.sub_volume_size[2]//self.patch_size))
-        self.pos_embed.data.copy_(torch.Tensor(pos_embed).float().unsqueeze(0))
+        pos_embed_tensor = torch.tensor(pos_embed, dtype=self.pos_embed.dtype, device=self.pos_embed.device).unsqueeze(0)
+        self.pos_embed.data.copy_(pos_embed_tensor)
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.x_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-
-        for blocks in self.IntraPatchFlow_input:
-            for block in blocks:
-                if isinstance(block,DiTBlock):
-                    nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-                    nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-                else:
-                    nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-                    nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-                    nn.init.constant_(block.linear.weight, 0)
-                    nn.init.constant_(block.linear.bias, 0)
-                    
-        for block in self.IntraPatchFlow_mid:
-            if isinstance(block,DiTBlock):
-                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-            else:
-                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-                nn.init.constant_(block.linear.weight, 0)
-                nn.init.constant_(block.linear.bias, 0)
+        if self.x_embedder.proj.bias is not None:
+            nn.init.constant_(self.x_embedder.proj.bias, 0)
         
-        for blocks in self.IntraPatchFlow_output:
-            for block in blocks:
-                if isinstance(block,DiTBlock):
-                    nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-                    nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-                else:
-                    nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-                    nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-                    nn.init.constant_(block.linear.weight, 0)
-                    nn.init.constant_(block.linear.bias, 0)
+        # Zero-init final conv for diffusion stability
+        nn.init.zeros_(self.final_conv[-1].weight)
+        nn.init.zeros_(self.final_conv[-1].bias)
+        
+        # Kaiming normal init for init_conv (suited for GELU/ReLU)
+        nn.init.kaiming_normal_(self.init_conv.weight, nonlinearity="relu")
+        nn.init.constant_(self.init_conv.bias, 0)
+
+        # Apply custom initialization to all DiT blocks using their own _init_weights method
+        for module in self.modules():
+            if isinstance(module, (DiTBlock, TextConditionedDiTBlock, FinalLayer)):
+                module._init_weights()
 
 
 
@@ -650,97 +847,183 @@ class BiFlowNet(nn.Module):
         self,
         x,
         time,
+        text_embed=None,
         y=None,
         res=None,
     ):
-        assert (y is not None) == (
-            self.cond_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-        # y = (y*0).to(torch.int)
+
+        assert ((text_embed is not None) or (y is not None)) == (
+            self.text_embed_dim is not None
+        ), "must specify text_embed if and only if the model is text-conditional"
         
+        if (text_embed is None) and (y is not None):
+            text_embed = y
+        elif (text_embed is not None) and (y is not None):
+            raise ValueError("Provide only one of {text_embed, y}, not both.")
+
         b = x.shape[0]
-        ori_shape = (x.shape[2]*8,x.shape[3]*8,x.shape[4]*8) 
-        # time_rel_pos_bias = self.time_rel_pos_bias(x.shape[2], device=x.device)
+        D, H, W = x.shape[2:]
+        ps = self.sub_volume_size[0]  # assert all equal
+        assert D % ps == 0 and H % ps == 0 and W % ps == 0, f"Input shape {x.shape[2:]} not divisible by patch size {ps}"
+        
+        # Number of patches per axis
+        # This patches are for DiT! ps = 8 (commmented 250918)
+        nD, nH, nW = D // ps, H // ps, W // ps
+        
         x_IntraPatch = x.clone()
-        # x_IntraPatch.retain_grad() 
-        p = self.sub_volume_size[0]
-        x_IntraPatch = x_IntraPatch.unfold(2,p,p).unfold(3,p,p).unfold(4,p,p)
-        p1 , p2 , p3= x_IntraPatch.size(2) , x_IntraPatch.size(3) , x_IntraPatch.size(4)
-        x_IntraPatch = rearrange(x_IntraPatch , 'b c p1 p2 p3 d h w -> (b p1 p2 p3) c d h w')
+        x_IntraPatch = x_IntraPatch.unfold(2, ps, ps).unfold(3, ps, ps).unfold(4, ps, ps)
+        p1, p2, p3 = nD, nH, nW  # number of patches per axis
+        x_IntraPatch = rearrange(x_IntraPatch , 'b c p1 p2 p3 d h w -> (b p1 p2 p3) c d h w').contiguous()
         x = self.init_conv(x)
         r = x.clone()
 
 
-        t = self.time_mlp(time) if exists(self.time_mlp) else None
-        c = t.shape[-1]
-        t_DiT = t.unsqueeze(1).repeat(1,p1*p2*p3,1).view(-1,c)
+        # Build embeddings explicitly
+        time = time.to(dtype=self.pos_embed.dtype)  # Match model dtype (handles bf16)
+        t_time = self.time_mlp(time) if self.time_mlp is not None else None
+        time_dim = t_time.shape[-1]
 
-
-        if self.cond_classes:
-            assert y.shape == (x.shape[0],)
-            cond_emb = self.cond_emb(y)
-            cond_emb_DiT = cond_emb.unsqueeze(1).repeat(1,p1*p2*p3,1).view(-1,c)
-            t = t + cond_emb
-            t_DiT = t_DiT + cond_emb_DiT
-        if self.res_condition:
-            if len(res.shape) == 1:
+        # print(f"DEBUG PATCH CALC: Actual x_IntraPatch.shape = {x_IntraPatch.shape}")
+        # print(f"DEBUG PATCH CALC: ps={ps}, p1={p1}, p2={p2}, p3={p3}, P=p1*p2*p3={p1*p2*p3}")
+        
+        # Compute resolution conditioning once, up front
+        if self.res_condition and (res is not None):
+            if res.ndim == 1: 
                 res = res.unsqueeze(0)
-            res_condition_emb = self.res_mlp(res)
-            t = torch.cat((t,res_condition_emb),dim=1)
-            res_condition_emb_DiT = res_condition_emb.unsqueeze(1).repeat(1,p1*p2*p3,1).view(-1,c)
-            t_DiT = torch.cat((t_DiT,res_condition_emb_DiT),dim=1)
+            t_res = self.res_mlp(res)  # (B, time_dim)
+        else:
+            t_res = None
+        
+        # U-Net conditioning (must match ResnetBlock time_emb_dim)
+        if t_res is not None:
+            t_unet = torch.cat([t_time, t_res], dim=1)  # (B, 2*time_dim)
+        else:
+            t_unet = t_time  # (B, time_dim)
+        
+        # Guard: ResBlock time_mlp must match t_unet size
+        expected_sizes = {blk.mlp[-1].out_features for m in self.downs for blk in [m[0], m[2]] if hasattr(blk, "mlp") and blk.mlp is not None}
+        assert t_unet.shape[-1] in expected_sizes, \
+            f"ResnetBlock.mlp expects {expected_sizes}, but t_unet has size {t_unet.shape[-1]}"
+        
+        # DiT conditioning (must match cond_dim used in __init__)
+        parts = [t_time]
+        text_context = None
+        if self.text_embed_dim and text_embed is not None:
+            # Handle text pooling for additive conditioning
+            if text_embed.ndim == 3:  # (B, L, E) - sequence
+                # Pool sequence to single embedding (mean pooling for now)
+                # TODO: Add text_mask support for proper masked pooling
+                pooled_text = text_embed.mean(dim=1)  # (B, E)
+            else:  # (B, E) - single embedding
+                pooled_text = text_embed
+            
+            text_cond = self.text_proj(pooled_text)  # (B, time_dim)
+            parts.append(text_cond)
+            
+            # Prepare text context for cross-attention (keep sequence structure)
+            if text_embed.ndim == 3:  # (B, L, text_embed_dim) - sequence
+                text_context = self.text_context_proj(text_embed)  # [B, L, dim]
+            else:  # (B, text_embed_dim) - single embedding
+                text_context = self.text_context_proj(text_embed.unsqueeze(1))  # [B, 1, dim]
+        
+        if t_res is not None:
+            parts.append(t_res)
+        
+        c_dit = torch.cat(parts, dim=1)  # (B, cond_dim)
+        # print(f"DEBUG FORWARD: c_dit.shape = {c_dit.shape}")
+        # print(f"DEBUG FORWARD: parts = {[p.shape for p in parts]}")
+        # print(f"DEBUG FORWARD: expected cond_dim = {self.cond_dim}")
+        # Per-patch DiT conditioning
+        P = p1 * p2 * p3
+        c_dit_patch = c_dit.unsqueeze(1).expand(-1, P, -1).reshape(-1, c_dit.shape[-1])
+        
+        # Expand text_context to match the patch batch dimension
+        if text_context is not None:
+            text_context = text_context.unsqueeze(1).expand(-1, P, -1, -1).reshape(-1, text_context.shape[-2], text_context.shape[-1])
             
         x_IntraPatch = self.x_embedder(x_IntraPatch)
+        # Assert pos_embed size matches number of patches
+        assert self.pos_embed.shape[1] == self.x_embedder.num_patches, \
+            f"pos_embed size {self.pos_embed.shape[1]} != num_patches {self.x_embedder.num_patches}"
         x_IntraPatch = x_IntraPatch + self.pos_embed
         h_DiT , h_Unet,h,=[],[],[]
+
+        # Shape invariants for debugging
+        assert len(h_DiT) == 0, "h_DiT should start empty"
+        assert len(h_Unet) == 0, "h_Unet should start empty"
         for Block, MlpLayer in self.IntraPatchFlow_input:
-            x_IntraPatch = Block(x_IntraPatch,t_DiT)
+            # Call block with appropriate parameters based on type
+            # print(f"DEBUG BLOCK: Block type = {type(Block)}")
+            # print(f"DEBUG BLOCK: adaLN_modulation weight shape = {Block.adaLN_modulation[-1].weight.shape}")
+            # print(f"DEBUG BLOCK: Expected input dim = {Block.adaLN_modulation[-1].weight.shape[1]}")
+            # print(f"DEBUG BLOCK: Actual input dim = {c_dit_patch.shape[-1]}")
+            if isinstance(Block, TextConditionedDiTBlock):
+                x_IntraPatch = Block(x_IntraPatch, c_dit_patch, text_context=text_context)
+            else:
+                x_IntraPatch = Block(x_IntraPatch, c_dit_patch)
             h_DiT.append(x_IntraPatch)
-            Unet_feature = self.unpatchify_voxels(MlpLayer(x_IntraPatch,t_DiT))
-            Unet_feature = rearrange(Unet_feature, '(b p) c d h w -> b p c d h w', b=b) 
-            Unet_feature = rearrange(Unet_feature, 'b (p1 p2 p3) c d h w -> b c (p1 d) (p2 h) (p3 w)',
-                        p1=ori_shape[0]//self.vq_size, p2=ori_shape[1]//self.vq_size, p3=ori_shape[2]//self.vq_size)
+            Unet_feature = self.unpatchify_voxels(MlpLayer(x_IntraPatch, c_dit_patch))
+            Unet_feature = rearrange(Unet_feature, '(b p1 p2 p3) c ps ps2 ps3 -> b c (p1 ps) (p2 ps2) (p3 ps3)', 
+                                   b=b, p1=p1, p2=p2, p3=p3).contiguous()
             h_Unet.append(Unet_feature)
+
+        # Check DiT input tracker length
+        assert len(h_DiT) == self.feature_fusion, f"h_DiT should have {self.feature_fusion} entries, got {len(h_DiT)}"
 
         for Block in self.IntraPatchFlow_mid:
-            x_IntraPatch = Block(x_IntraPatch,t_DiT)
+            # Call block with appropriate parameters based on type
+            if isinstance(Block, TextConditionedDiTBlock):
+                x_IntraPatch = Block(x_IntraPatch, c_dit_patch, text_context=text_context)
+            else:
+                x_IntraPatch = Block(x_IntraPatch, c_dit_patch)
 
         for Block, MlpLayer in self.IntraPatchFlow_output:
-            x_IntraPatch = Block(x_IntraPatch,t_DiT , h_DiT.pop())
-            Unet_feature = self.unpatchify_voxels(MlpLayer(x_IntraPatch,t_DiT))
-            Unet_feature = rearrange(Unet_feature, '(b p) c d h w -> b p c d h w', b=b) 
-            Unet_feature = rearrange(Unet_feature, 'b (p1 p2 p3) c d h w -> b c (p1 d) (p2 h) (p3 w)',
-                        p1=ori_shape[0]//self.vq_size, p2=ori_shape[1]//self.vq_size, p3=ori_shape[2]//self.vq_size)
+            # Call block with appropriate parameters based on type
+            if isinstance(Block, TextConditionedDiTBlock):
+                x_IntraPatch = Block(x_IntraPatch, c_dit_patch, text_context=text_context, skip=h_DiT.pop())
+            else:
+                x_IntraPatch = Block(x_IntraPatch, c_dit_patch, skip=h_DiT.pop())
+            Unet_feature = self.unpatchify_voxels(MlpLayer(x_IntraPatch, c_dit_patch))
+            Unet_feature = rearrange(Unet_feature, '(b p1 p2 p3) c ps ps2 ps3 -> b c (p1 ps) (p2 ps2) (p3 ps3)', 
+                                   b=b, p1=p1, p2=p2, p3=p3).contiguous()
             h_Unet.append(Unet_feature)
         
+        # Check final tracker lengths
+        assert len(h_DiT) == 0, f"h_DiT should be empty after output processing, got {len(h_DiT)}"
+        assert len(h_Unet) == 2 * self.feature_fusion, f"h_Unet should have {2 * self.feature_fusion} entries, got {len(h_Unet)}"
 
         for idx, (block1, spatial_attn1, block2, spatial_attn2,downsample) in enumerate(self.downs):
-            if idx <self.feature_fusion :
+            if idx in self.inject_down_levels:
                 x = x + h_Unet.pop(0)
-            x = block1(x, t)
+            x = block1(x, t_unet)
             x = spatial_attn1(x)
             h.append(x)
-            x = block2(x, t)
+            x = block2(x, t_unet)
             x = spatial_attn2(x)
             h.append(x)
             x = downsample(x)
 
-        x = self.mid_block1(x, t)
+        x = self.mid_block1(x, t_unet)
         x = self.mid_spatial_attn(x)
-        x = self.mid_block2(x, t)
+        x = self.mid_block2(x, t_unet)
 
         for idx, (block1, spatial_attn1,block2, spatial_attn2,  upsample) in enumerate(self.ups):
-            if len(self.ups)-idx <= 2:
+            if (len(self.ups) - idx) <= self.inject_up_tail:
                 x = x + h_Unet.pop(0)
             x = torch.cat((x, h.pop()), dim=1)
-            x = block1(x, t)
+            x = block1(x, t_unet)
             x = spatial_attn1(x)
             x = torch.cat((x, h.pop()), dim=1)
-            x = block2(x, t)
+            x = block2(x, t_unet)
             x = spatial_attn2(x)
             x = upsample(x)
 
         x = torch.cat((x, r), dim=1)
+        
+        # End-of-forward sanity: ensure all injected tensors consumed
+        assert len(h_Unet) == 0, f"Leftover injected features: {len(h_Unet)} (misconfigured inject_*)"
+        assert len(h) == 0, f"Skip stack not fully consumed: {len(h)} (U-Net symmetry issue)"
+        
         return self.final_conv(x)
     def unpatchify_voxels(self, x0):
         """
@@ -792,10 +1075,6 @@ class GaussianDiffusion(nn.Module):
     ):
         super().__init__()
         self.channels = channels
-
-
-
-
 
         betas = cosine_beta_schedule(timesteps)
 
@@ -1065,20 +1344,21 @@ class GaussianDiffusion(nn.Module):
                     t, x_start.shape) * noise
         )
 
-    def p_losses(self, denoise_fn,x_start, t, y=None, res=None,noise=None, hint = None,**kwargs):
+    def p_losses(self, denoise_fn,x_start, t, text_embed=None, res=None,noise=None, hint = None,**kwargs):
+
         b, c, f, h, w, device = *x_start.shape, x_start.device
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
 
-        if is_list_str(y):
-            y = bert_embed(
-                tokenize(y), return_cls_repr=self.text_use_bert_cls)
-            y = y.to(device)
+        if is_list_str(text_embed):
+            text_embed = bert_embed(
+                tokenize(text_embed), return_cls_repr=self.text_use_bert_cls)
+            text_embed = text_embed.to(device)
         if hint == None:
-            x_recon = denoise_fn(x_noisy, t, y=y,res=res)
+            x_recon = denoise_fn(x_noisy, t, text_embed=text_embed,res=res)
         else:
-            x_recon = denoise_fn(x_noisy, t, y=y, res=res,hint = hint)
+            x_recon = denoise_fn(x_noisy, t, text_embed=text_embed, res=res,hint = hint)
         # time_rel_pos_bias = self.time_rel_pos_bias(x.shape[2], device=x.device)
         if self.loss_type == 'l1':
             loss = F.l1_loss(noise, x_recon)

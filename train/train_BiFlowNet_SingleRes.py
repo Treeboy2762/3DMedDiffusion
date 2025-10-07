@@ -8,6 +8,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 from collections import OrderedDict
@@ -162,20 +163,18 @@ def main(args):
         logger = create_logger(None)
 
     # Create model:
-
-
-
     model = BiFlowNet(
             dim=args.model_dim,
             dim_mults=args.dim_mults,
             channels=args.volume_channels,
             init_kernel_size=3,
-            cond_classes=args.num_classes,
+            text_embed_dim=args.text_embed_dim,  # Changed from cond_classes
             learn_sigma=False,
             use_sparse_linear_attn=args.use_attn,
             vq_size=args.vq_size,
             num_mid_DiT = args.num_dit,
-            patch_size = args.patch_size
+            patch_size = args.patch_size,
+            cross_attn_freq=args.cross_attn_freq
         ).cuda()
     diffusion= GaussianDiffusion(
         channels=args.volume_channels,
@@ -196,6 +195,8 @@ def main(args):
         raise NotImplementedError()
 
     logger.info(f"Model Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"Text Conditioning: text_embed_dim={args.text_embed_dim}, max_text_len={args.max_text_len}")
+    logger.info(f"Cross-attention frequency: every {args.cross_attn_freq} DiT layers")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     
@@ -213,16 +214,36 @@ def main(args):
             start_epoch = checkpoint['epoch']
         del checkpoint 
         logger.info(f'Using checkpoint: {args.ckpt}')
-    # Setup data:
 
-    dataset = Singleres_dataset(args.data_path, resolution=args.resolution)
+    dataset = Singleres_dataset(
+        args.data_path, 
+        resolution=args.resolution,
+        max_text_len=args.max_text_len  # Add max text length parameter
+    )
+    # loader = DataLoader(
+    #     dataset=dataset,
+    #     batch_size = args.batch_size, 
+    #     num_workers=args.num_workers,
+    #     shuffle=True,
+    # )
+
+    # Create a sampler that gives each process a different slice of the data
+    sampler = DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=rank,
+            shuffle=True,       # sampler does the shuffling
+            drop_last=False     # or True to keep batch sizes equal across ranks
+        )
+
     loader = DataLoader(
         dataset=dataset,
-        batch_size = args.batch_size, 
+        batch_size=args.batch_size, 
         num_workers=args.num_workers,
-        shuffle=True,
+        sampler=sampler, # IMPORTANT: Add the sampler here
+        shuffle=False,
+        persistent_workers=True
     )
-
 
 
     if args.ckpt:
@@ -238,23 +259,74 @@ def main(args):
     start_time = time()
 
     logger.info(f"Training for {args.epochs} epochs...")
+
+    '''
+    잠깐 디버깅하려고 넣은거임
+    '''
+
+    # # Add this import
+    # from torch.profiler import profile, record_function, ProfilerActivity
+
+    # # ... inside your training loop ...
+    # with profile(
+    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     record_shapes=True,
+    #     with_stack=True,
+    #     profile_memory=True
+    # ) as prof:
+    #     for epoch in range(start_epoch, 1): # Just run for a few steps in one epoch
+    #         # sampler.set_epoch(epoch)
+    #         for step, batch in enumerate(loader):
+    #             if step >= (args.log_every + 10): # Profile for a bit more than one log cycle
+    #                 break
+                
+    #             z, text_embed, res = batch
+    #             z = z.to(device)
+    #             text_embed = text_embed.to(device)
+    #             res = res.to(device)
+                
+    #             with record_function("model_forward_backward"):
+    #                 with autocast(enabled=amp):
+    #                     t = torch.randint(0, diffusion.num_timesteps, (z.shape[0],), device=device)
+    #                     loss = diffusion.p_losses(model, z, t, text_embed=text_embed, res=res)
+    #                     scaler.scale(loss).backward()
+
+    #             with record_function("optimizer_step"):
+    #                 scaler.step(opt)
+    #                 scaler.update()
+    #                 opt.zero_grad()
+
+    # # After the loop, print the results
+    # if rank == 0:
+    #     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
+
+    '''
+    잠깐 디버깅하려고 넣은거임
+    '''
+
+    # Define fixed noise outside the training loop to ensure coherence across checkpoints
+    volume_size = args.resolution
+    fixed_z = torch.randn(1, args.volume_channels, volume_size[0], volume_size[1], volume_size[2], device=device)
+    with torch.no_grad():
+        _, fixed_embedding, fixed_res = dataset[0]
+        fixed_embedding = fixed_embedding.unsqueeze(0).to(device)
+
     for epoch in range(start_epoch,args.epochs):
         logger.info(f"Beginning epoch {epoch}...")
-        for z,y,res in loader:
+        sampler.set_epoch(epoch) # Add this line
+        for z, text_embed, res in loader:  # Changed from y to text_embed
             b = z.shape[0]
             z = z.to(device)
-            y = y.to(device)
+            text_embed = text_embed.to(device)  # Changed from y to text_embed
             res = res.to(device)
             with autocast(enabled=amp):
                 t = torch.randint(0, diffusion.num_timesteps, (b,), device=device)
-                loss = diffusion.p_losses(model, z,t,y=y,res=res)
+                loss = diffusion.p_losses(model, z, t, text_embed=text_embed, res=res)  # Changed parameter name
                 scaler.scale(loss).backward()
 
             scaler.step(opt)
             scaler.update()
             opt.zero_grad()          
-
-
 
             running_loss += loss.item()
             log_steps += 1
@@ -297,18 +369,16 @@ def main(args):
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
                     if len(os.listdir(checkpoint_dir))>6:
-                        os.remove(f"{checkpoint_dir}/{train_steps-6*args.ckpt_every:07d}.pt")
+                        old_checkpoint_path = f"{checkpoint_dir}/{train_steps-6*args.ckpt_every:07d}.pt"
+                        if os.path.exists(old_checkpoint_path):
+                            os.remove(old_checkpoint_path)
                     with torch.no_grad():
                         milestone = train_steps // args.ckpt_every
                         
-                        cls_num = np.random.choice(list(range(0,args.num_classes)))
-                        # cls_num = 1 #
-                        volume_size = args.resolution
-                        z = torch.randn(1, args.volume_channels, volume_size[0], volume_size[1],volume_size[2], device=device)
-                        y = torch.tensor([cls_num], device=device)
-                        res = torch.tensor(volume_size,device=device)/64.0
+                        # For text conditioning, re-use a text embedding in the training. Conversion to float needed here.
+                        res = torch.tensor(volume_size, device=device) / 64.0
                         samples = diffusion.p_sample_loop(
-                            ema_model, z, y = y,res=res
+                            ema_model, fixed_z, y=fixed_embedding.float(), res=res
                         )
                         samples = (((samples + 1.0) / 2.0) * (AE.codebook.embeddings.max() -
                                                             AE.codebook.embeddings.min())) + AE.codebook.embeddings.min()
@@ -318,7 +388,7 @@ def main(args):
                         volume = AE.decode(samples, quantize=True)
 
 
-                        volume_path = os.path.join(samples_dir,str(f'{milestone}_{str(cls_num)}.nii.gz')) 
+                        volume_path = os.path.join(samples_dir, str(f'{milestone}_text_sample.nii.gz')) 
                         volume = volume.detach().squeeze(0).cpu()
                         volume = volume.transpose(1,3).transpose(1,2)
                         tio.ScalarImage(tensor = volume).save(volume_path)
@@ -337,7 +407,7 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, required=True)
     parser.add_argument("--loss-type", type=str, default='l1')
-    parser.add_argument("--volume-channels", type=int, default=8)
+    parser.add_argument("--volume-channels", type=int, default=6)
     parser.add_argument("--timesteps", type=int, default=1000)
     parser.add_argument("--model-dim", type=int, default=72)
     parser.add_argument("--dim-mults", nargs='+', type=int, default=[1,1,2,4,8])
@@ -347,10 +417,12 @@ if __name__ == "__main__":
     parser.add_argument("--enable_amp", type=bool, default=True)
     parser.add_argument("--model", type=str,default="BiFlowNet")
     parser.add_argument("--AE-ckpt", type=str, required=True)
-    parser.add_argument("--num-classes", type=int, default=7)
+    parser.add_argument("--text-embed-dim", type=int, default=768, help="Text embedding dimension (BiomedVLP: 768)")
+    parser.add_argument("--max-text-len", type=int, default=512, help="Maximum text sequence length")
+    parser.add_argument("--cross-attn-freq", type=int, default=2, help="Apply cross-attention every N DiT layers")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--num-workers", type=int, default=8) 
+    parser.add_argument("--num-workers", type=int, default=4) 
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument('--resolution', nargs='+', type=int, default=[32, 32, 32])
     parser.add_argument("--log-every", type=int, default=50)

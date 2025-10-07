@@ -1,11 +1,11 @@
 model:
   seed: 1234
-  batch_size: 1
-  num_workers: 4
+  batch_size: 16
+  num_workers: 8
 
-  gpus: 4
-  default_root_dir: /tmp/gcsfuse_CTRATE/3DMedDiffusion_stage2
-  resume_from_checkpoint: /tmp/gcsfuse_CTRATE/3DMedDiffusion_stage2/my_model/version_6/checkpoints/latest_checkpoint.ckpt
+  gpus: 2
+  default_root_dir: /tmp/gcsfuse_CTRATE/3DMedDiffusion_CT_RATE_training
+  resume_from_checkpoint: /project/flame/daesungk/3DMedDiffusion_CT_RATE_training/CT_RATE_model/version_36/checkpoints/epoch=5-step=4000-train/recon_loss=0.20.ckpt
   max_steps: 1000000
   max_epochs: 10000
   precision: bf16
@@ -18,7 +18,7 @@ model:
   downsample: [4, 4, 4]
   disc_channels: 24
   disc_layers: 3
-  discriminator_iter_start: 0
+  discriminator_iter_start: 3500
   disc_loss_type: hinge
   volume_gan_weight: 2
   l1_weight: 4.0
@@ -29,7 +29,8 @@ model:
   no_random_restart: False
   norm_type: group
   num_groups: 12
-  stage: 2
+  stage: 1
+
 
 dataset:
   root_dir: /home/daesungk/3DMedDiffusion/config/CT_RATE_data.json

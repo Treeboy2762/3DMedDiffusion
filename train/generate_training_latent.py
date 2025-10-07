@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from AutoEncoder.model.PatchVolume import patchvolumeAE 
 from dataset.Singleres_dataset import Singleres_dataset
 import torch
+import numpy as np
 from os.path import join
 import argparse
 import torchio as tio
@@ -42,8 +43,7 @@ def generate(args):
             latent_dir_name = dir_name + '_latents'
             path = path.replace(dir_name, latent_dir_name)
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            img = tio.ScalarImage(tensor = output_ )
-            img.save(path)   
+            np.save(path, output_.numpy())   
 
 if __name__ == "__main__":
  

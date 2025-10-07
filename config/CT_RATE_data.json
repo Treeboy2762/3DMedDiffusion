@@ -1,0 +1,7 @@
+{
+    "CT_RATE_train": "gs://cmu-gpucloud-daesungk/CT-RATE/dataset/train_fixed/",
+    "CT_RATE_val": "gs://cmu-gpucloud-daesungk/CT-RATE/dataset/valid_fixed/",
+
+    "CT_RATE_train_label": "/home/daesungk/CT-RATE/labels/train_labels_filtered.csv",
+    "CT_RATE_val_label": "/home/daesungk/CT-RATE/labels/valid_labels_filtered.csv"
+}

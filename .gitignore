@@ -1,0 +1,111 @@
+# Python
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyTorch
+*.pth
+*.pt
+*.pkl
+*.pickle
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# SLURM job files
+slurm-*.err
+slurm-*.out
+*.slurm
+
+# Test generation outputs
+test_generation_*/
+generated_sample_*.nii.gz
+
+# Concept attention results
+concept_attention_results/
+latent_analysis_results/
+
+# Model checkpoints and training outputs
+checkpoints/
+samples/
+logs/
+runs/
+wandb/
+tensorboard_logs/
+
+# Large model files and datasets
+*.h5
+*.hdf5
+*.npy
+*.npz
+models/
+data/
+datasets/
+
+# Environment and config
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Medical imaging specific
+*.dcm
+*.DICOM
+*.nii
+*.nii.gz
+*.img
+*.hdr
+
+# Large files that shouldn't be in git
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Custom exclusions for your project
+checkpoints/
+samples/

@@ -1,10 +1,6 @@
 model:
-  seed: 1234
-  batch_size: 16
-  num_workers: 8
-
-  gpus: 1
-  default_root_dir: /home/daesungk/3DMedDiffusion
+  gpus: 4                 # Changed to 4 GPUs
+  default_root_dir: /project/flame/daesungk/3DMedDiffusion_CT_RATE_training
   resume_from_checkpoint: 
   max_steps: 1000000
   max_epochs: 10000
@@ -32,7 +28,7 @@ model:
   stage: 1
 
 dataset:
-  root_dir: /home/daesungk/3DMedDiffusion/config/PatchVolume_data.json
+  root_dir: /home/daesungk/3DMedDiffusion/config/CT_RATE_data.json
   image_channels: 1
   imgtype: CT
   patch_size: 64
